@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Les Livrets de Multiplication - Adaptatif</title>
+    <!-- Chargement de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "",
+            authDomain: "classe-numerique-prof.firebaseapp.com",
+            projectId: "classe-numerique-prof",
+            storageBucket: "classe-numerique-prof.appspot.com",
+            messagingSenderId: "123456789",
+            appId: "1:123456:web:abcde"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const nomEleve = urlParams.get('eleve') || "Élève Mystère";
+        window.nomEleve = nomEleve;
+
+        // Analyse l'historique de l'élève pour les tables afin de trier par ordre de difficulté d'apprentissage
+        async function analyserHistoriqueLivrets() {
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'scores');
+                const querySnapshot = await getDocs(colRef);
+                const historique = [];
+                
+                querySnapshot.forEach(doc => {
+                    const data = doc.data();
+                    if (data.nomEleve === nomEleve && data.exercice === "Les Livrets") {
+                        historique.push(data);
+                    }
+                });
+
+                // Compiler les échecs par couple de multiplication (ex: "7 x 8")
+                const erreursMultiplications = {};
+                historique.forEach(session => {
+                    if (session.details) {
+                        session.details.forEach(q => {
+                            if (!q.isCorrect) {
+                                // Nettoyage de la clé (ex: "7 x 8" ou "8 x 7")
+                                const parts = q.questionText.split('x').map(p => parseInt(p.trim()));
+                                if (parts.length === 2) {
+                                    const low = Math.min(parts[0], parts[1]);
+                                    const high = Math.max(parts[0], parts[1]);
+                                    const cle = `${low} x ${high}`;
+                                    erreursMultiplications[cle] = (erreursMultiplications[cle] || 0) + 1;
+                                }
+                            }
+                        });
+                    }
+                });
+
+                window.erreursMultiplicationsHistorique = erreursMultiplications;
+                document.getElementById('loading-overlay').classList.add('hidden');
+                genererQuestionsAdaptatives();
+
+            } catch (e) {
+                console.error("Échec d'analyse adaptative. Démarrage classique.", e);
+                window.erreursMultiplicationsHistorique = {};
+                document.getElementById('loading-overlay').classList.add('hidden');
+                genererQuestionsAdaptatives();
+            }
+        }
+
+        // Sauvegarde de la session de jeu dans Firestore
+        async function enregistrerSession(corrects, erreurs, detailQuestions) {
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'scores');
+                await addDoc(colRef, {
+                    nomEleve: nomEleve,
+                    exercice: "Les Livrets",
+                    corrects: corrects,
+                    erreurs: erreurs,
+                    timestamp: Date.now(),
+                    details: detailQuestions
+                });
+                console.log("Résultats de multiplication sauvegardés.");
+            } catch (e) {
+                console.error("Erreur d'écriture Firebase :", e);
+            }
+        }
+
+        // Rendre les fonctions disponibles de manière globale en les attachant à l'objet window
+        window.analyserHistoriqueLivrets = analyserHistoriqueLivrets;
+        window.enregistrerSession = enregistrerSession;
+
+        // Une fois que tout le module est chargé, on lance l'initialisation de la page
+        document.addEventListener("DOMContentLoaded", () => {
+            document.getElementById('student-tag').innerText = window.nomEleve;
+            initialiserPythagoreTable();
+            analyserHistoriqueLivrets();
+        });
+    </script>
+</head>
+<body class="bg-slate-100 min-h-screen flex items-center justify-center p-4">
+
+    <!-- ÉCRAN DE CHARGEMENT PROFIL ADAPTATIF -->
+    <div id="loading-overlay" class="fixed inset-0 bg-violet-950/95 z-50 flex flex-col items-center justify-center text-white p-6">
+        <span class="text-6xl animate-pulse mb-4">🧠</span>
+        <h2 class="text-2xl font-bold mb-2">Chargement du profil de l'élève</h2>
+        <p class="text-violet-200 text-sm max-w-sm text-center">Nous passons au crible tes livrets précédemment échoués pour te proposer des calculs sur-mesure...</p>
+    </div>
+
+    <!-- CARTE PRINCIPALE -->
+    <div class="bg-white p-6 md:p-8 rounded-3xl shadow-xl max-w-md w-full text-center relative border border-slate-150">
+        <div class="flex justify-between items-center mb-6">
+            <button onclick="window.location.href='index.html'" class="text-violet-600 hover:underline font-bold text-sm flex items-center gap-1">◀ Accueil</button>
+            <div id="badge-question" class="text-xs bg-violet-50 text-violet-600 font-bold px-3 py-1 rounded-full">Calcul 1 / 10</div>
+        </div>
+
+        <h1 class="text-2xl font-bold text-slate-800 font-serif">Les Livrets de Multiplication ✖️</h1>
+        <p class="text-xs text-slate-400 mt-1">Élève : <span id="student-tag" class="font-bold text-slate-600">...</span></p>
+
+        <div class="flex justify-center gap-6 my-5 bg-violet-50/50 py-3 rounded-2xl border border-violet-100/50">
+            <div class="text-green-600 font-bold">Justes : <span id="score-c">0</span></div>
+            <div class="text-red-500 font-bold">Faux : <span id="score-w">0</span></div>
+        </div>
+
+        <!-- ZONE JEU ACTIVE -->
+        <div id="game-zone">
+            <!-- Bouton d'aide interactif -->
+            <button onclick="ouvrirAide()" class="bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-800 text-xs font-bold py-2 px-4 rounded-xl transition mb-4 flex items-center gap-1.5 mx-auto active:scale-95 shadow-sm">
+                💡 Voir la table de multiplication (aide)
+            </button>
+
+            <div id="question" class="text-5xl font-black text-violet-700 my-8 tracking-tight">...</div>
+
+            <input type="number" id="reponse" placeholder="Réponse ?" 
+                   class="w-full max-w-xs px-4 py-4 border-2 border-slate-200 rounded-2xl text-center text-3xl font-bold focus:border-violet-500 focus:outline-none mb-4 shadow-sm">
+            
+            <button id="validate-btn" onclick="verifier()" class="w-full bg-violet-600 text-white font-bold py-4 rounded-2xl hover:bg-violet-700 transition active:scale-95 shadow-md">Valider</button>
+            <p id="feedback" class="mt-4 font-bold text-md min-h-[1.5em]"></p>
+            <button id="next-btn" onclick="prochainCalcul()" class="w-full bg-emerald-500 text-white font-bold py-4 rounded-2xl hover:bg-emerald-600 transition hidden shadow-md">Calcul suivant ➔</button>
+        </div>
+
+        <!-- ZONE DE CLÔTURE -->
+        <div id="finish-zone" class="hidden">
+            <span class="text-6xl my-4 block">🏆</span>
+            <h2 class="text-2xl font-bold text-slate-800 mb-2 font-serif">Atelier d'aujourd'hui complété !</h2>
+            <p class="text-slate-500 mb-6 text-sm">Tes calculs et les éventuels essais ont été automatiquement enregistrés dans l'espace enseignant.</p>
+            <div class="text-5xl font-black text-violet-700 mb-8" id="final-score">0 / 10</div>
+            <button onclick="window.location.href='index.html'" class="w-full bg-violet-600 text-white font-bold py-4 rounded-2xl hover:bg-violet-700 transition shadow-md">Retourner au portail</button>
+        </div>
+    </div>
+
+    <!-- MODAL D'AIDE : TABLE DE PYTHAGORE -->
+    <div id="aide-modal" class="fixed inset-0 bg-slate-950/80 z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white w-full max-w-2xl rounded-3xl shadow-2xl p-6 flex flex-col max-h-[90vh]">
+            <div class="flex justify-between items-center border-b pb-4 mb-4">
+                <h3 class="text-xl font-bold text-slate-800 font-serif">Table de Pythagore interactive</h3>
+                <button onclick="fermerAide()" class="text-slate-500 hover:text-slate-800 text-3xl font-bold">&times;</button>
+            </div>
+            
+            <p class="text-xs text-slate-500 mb-4">Clique sur une cellule pour voir la formule ou cherche la ligne et la colonne correspondantes.</p>
+
+            <div class="flex-grow overflow-auto p-1 bg-slate-50 rounded-2xl border border-slate-200">
+                <!-- Grille interactive de Pythagore -->
+                <div class="grid grid-cols-11 gap-1 text-center font-bold text-xs min-w-[500px]" id="pythagore-grid">
+                    <!-- Généré dynamiquement en JS -->
+                </div>
+            </div>
+            
+            <div class="mt-4 text-center bg-violet-50 border border-violet-100 p-3 rounded-xl font-bold text-violet-950 text-sm" id="selection-display">
+                Sélectionne une case de la table pour réviser !
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let solution;
+        let corrects = 0;
+        let erreurs = 0;
+        let totalQuestions = 0;
+        let essais = 0;
+
+        let detailsSession = [];
+        let essaisActuelsQuestion = [];
+        let listeQuestionsCalculs = [];
+
+        // Prépare et sélectionne 10 questions de multiplication adaptatives
+        function genererQuestionsAdaptatives() {
+            const erreursHistorique = window.erreursMultiplicationsHistorique || {};
+
+            // Créer tous les couples possibles de 1x1 à 10x10
+            let couples = [];
+            for (let i = 1; i <= 10; i++) {
+                for (let j = 1; j <= 10; j++) {
+                    const low = Math.min(i, j);
+                    const high = Math.max(i, j);
+                    const cle = `${low} x ${high}`;
+                    const nbErreurs = erreursHistorique[cle] || 0;
+
+                    couples.push({
+                        n1: i,
+                        n2: j,
+                        cle: cle,
+                        // Plus il y a eu d'erreurs historiques, plus la priorité de sélection est élevée
+                        priorite: nbErreurs + Math.random() * 0.2
+                    });
+                }
+            }
+
+            // Trier par priorité décroissante
+            couples.sort((a, b) => b.priorite - a.priorite);
+
+            // Retenir les 10 plus prioritaires pour cette session
+            listeQuestionsCalculs = couples.slice(0, 10);
+            chargerCalcul();
+        }
+
+        function chargerCalcul() {
+            essais = 0;
+            essaisActuelsQuestion = [];
+            document.getElementById('feedback').innerText = "";
+            document.getElementById('reponse').value = "";
+            document.getElementById('reponse').disabled = false;
+            document.getElementById('validate-btn').classList.remove('hidden');
+            document.getElementById('next-btn').classList.add('hidden');
+            document.getElementById('badge-question').innerText = `Calcul ${totalQuestions + 1} / 10`;
+
+            const calc = listeQuestionsCalculs[totalQuestions];
+            solution = calc.n1 * calc.n2;
+
+            document.getElementById('question').innerText = `${calc.n1} × ${calc.n2}`;
+            document.getElementById('reponse').focus();
+        }
+
+        function verifier() {
+            const input = document.getElementById('reponse');
+            const repEleve = parseInt(input.value);
+            const feedback = document.getElementById('feedback');
+
+            if (isNaN(repEleve)) return;
+
+            essaisActuelsQuestion.push(repEleve.toString());
+
+            if (repEleve === solution) {
+                feedback.innerText = "✅ Bravo ! C'est tout à fait juste.";
+                feedback.className = "mt-4 font-bold text-md text-green-600";
+                corrects++;
+                document.getElementById('score-c').innerText = corrects;
+
+                detailsSession.push({
+                    questionText: document.getElementById('question').innerText.replace('×', 'x'),
+                    correctAnswer: solution.toString(),
+                    attempts: [...essaisActuelsQuestion],
+                    isCorrect: true
+                });
+
+                finaliserEtape();
+            } else {
+                essais++;
+                if (essais < 2) {
+                    feedback.innerText = "❌ Ce n'est pas le bon produit. Rappelle-toi de tes tables, ou consulte l'aide !";
+                    feedback.className = "mt-4 font-bold text-md text-orange-500";
+                    input.value = "";
+                    input.focus();
+                } else {
+                    feedback.innerText = `❌ Oups ! La bonne réponse était ${solution}.`;
+                    feedback.className = "mt-4 font-bold text-md text-red-500";
+                    erreurs++;
+                    document.getElementById('score-w').innerText = erreurs;
+
+                    detailsSession.push({
+                        questionText: document.getElementById('question').innerText.replace('×', 'x'),
+                        correctAnswer: solution.toString(),
+                        attempts: [...essaisActuelsQuestion],
+                        isCorrect: false
+                    });
+
+                    finaliserEtape();
+                }
+            }
+        }
+
+        function finaliserEtape() {
+            totalQuestions++;
+            document.getElementById('reponse').disabled = true;
+            document.getElementById('validate-btn').classList.add('hidden');
+            document.getElementById('next-btn').classList.remove('hidden');
+        }
+
+        function prochainCalcul() {
+            if (totalQuestions >= 10) {
+                document.getElementById('game-zone').classList.add('hidden');
+                document.getElementById('finish-zone').classList.remove('hidden');
+                document.getElementById('final-score').innerText = `${corrects} / 10`;
+                window.enregistrerSession(corrects, erreurs, detailsSession);
+            } else {
+                chargerCalcul();
+            }
+        }
+
+        // --- GESTION INTERACTIVE DE LA TABLE D'AIDE ---
+        function ouvrirAide() {
+            document.getElementById('aide-modal').classList.remove('hidden');
+        }
+
+        function fermerAide() {
+            document.getElementById('aide-modal').classList.add('hidden');
+        }
+
+        // Génère la table de Pythagore interactive au démarrage
+        function initialiserPythagoreTable() {
+            const grid = document.getElementById('pythagore-grid');
+            grid.innerHTML = "";
+
+            // Cellule d'angle vide
+            const angle = document.createElement('div');
+            angle.className = "bg-slate-200 text-slate-800 p-2 border border-slate-300 font-extrabold flex justify-center items-center rounded-tl-lg";
+            angle.innerText = "×";
+            grid.appendChild(angle);
+
+            // Entête colonne de 1 à 10
+            for (let c = 1; c <= 10; c++) {
+                const headerCol = document.createElement('div');
+                headerCol.className = "bg-slate-200 text-slate-700 p-2 border border-slate-300 font-extrabold flex justify-center items-center";
+                headerCol.innerText = c;
+                grid.appendChild(headerCol);
+            }
+
+            // Génération des lignes de la grille
+            for (let r = 1; r <= 10; r++) {
+                // Entête ligne
+                const headerRow = document.createElement('div');
+                headerRow.className = "bg-slate-200 text-slate-700 p-2 border border-slate-300 font-extrabold flex justify-center items-center";
+                headerRow.innerText = r;
+                grid.appendChild(headerRow);
+
+                for (let col = 1; col <= 10; col++) {
+                    const cellValue = r * col;
+                    const cell = document.createElement('div');
+                    cell.className = "bg-white p-2 border border-slate-200 hover:bg-violet-100 hover:text-violet-900 cursor-pointer font-bold flex justify-center items-center rounded transition-all";
+                    cell.innerText = cellValue;
+                    
+                    cell.onclick = () => {
+                        document.getElementById('selection-display').innerText = `${r} × ${col} = ${cellValue}`;
+                    };
+
+                    grid.appendChild(cell);
+                }
+            }
+        }
+
+        document.getElementById('reponse').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                if (!document.getElementById('validate-btn').classList.contains('hidden')) {
+                    verifier();
+                } else {
+                    prochainCalcul();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
